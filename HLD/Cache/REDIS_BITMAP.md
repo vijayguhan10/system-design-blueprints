@@ -13,6 +13,7 @@ They’re stored inside a normal Redis **string value**, and Redis exposes bit o
 ## Why it’s useful
 
 A bitmap is extremely memory efficient for **presence / membership flags**:
+
 - “Does userId 123 exist?”
 - “Has userId 123 already been processed?”
 - “Was this shard already scanned?”
@@ -30,17 +31,18 @@ If your `userId` is numeric (0..N), you can directly map:
 Example (redis-cli):
 
 - `SETBIT users:presence 123 1`
-- `GETBIT users:presence 123`  → `1`
-- `GETBIT users:presence 999`  → `0`
+- `GETBIT users:presence 123` → `1`
+- `GETBIT users:presence 999` → `0`
 
 ## If userId is a string
 
 Bitmaps need a numeric `offset`. For string IDs you typically:
 
-1) **Hash** the string to a number, then
-2) `offset = hash % BIT_SIZE`
+1. **Hash** the string to a number, then
+2. `offset = hash % BIT_SIZE`
 
 This becomes a **fast-negative filter** (similar to a very small Bloom filter):
+
 - `GETBIT` = 0 → definitely not present
 - `GETBIT` = 1 → might be present (hash collisions)
 
