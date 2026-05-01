@@ -1,79 +1,34 @@
 /*
-  Simple (non-complex) MongoDB + Bitmap cache demo
+	Simple (non-complex) MongoDB + Redis cache demo
 
-  - no classes
-  - only 3 endpoints
-  - 1 endpoint to POST user data to MongoDB
-  - 1 endpoint to GET user from MongoDB and return fetch time
-  - 1 endpoint to GET user from cache (bitmap + Map), fallback to MongoDB
+	- no classes
+	- only 3 endpoints
+	- 1 endpoint to POST user data to MongoDB
+	- 1 endpoint to GET user from MongoDB and return fetch time
+	- 1 endpoint to GET user from Redis cache, fallback to MongoDB
 
-  Install:
-    npm i express mongodb
+	Install:
+		npm i express mongodb redis
 
-  Run:
-    MONGO_URI="mongodb://localhost:27017" \
-    MONGO_DB="app" \
-    MONGO_COLLECTION="users" \
-    node HLD/Cache/Bitmap.js
+	Run:
+		REDIS_URL="redis://localhost:6379" \
+		MONGO_URI="mongodb://localhost:27017" \
+		MONGO_DB="app" \
+		MONGO_COLLECTION="users" \
+		node HLD/Cache/Bitmap.js
 */
 
 'use strict';
 
 const express = require('express');
 const { MongoClient } = require('mongodb');
-
-// -----------------------------
-// Minimal bitmap helpers
-// -----------------------------
-
-const BIT_SIZE = 1 << 20; // 1,048,576 bits (~128KB)
-const BIT_WORDS = new Uint32Array(Math.ceil(BIT_SIZE / 32));
-
-function fnv1a32(str) {
-	let hash = 0x811c9dc5;
-	for (let i = 0; i < str.length; i++) {
-		hash ^= str.charCodeAt(i);
-		hash = Math.imul(hash, 0x01000193);
-	}
-	return hash >>> 0;
-}
-
-function bitIndexForKey(key) {
-	return fnv1a32(String(key)) % BIT_SIZE;
-}
-
-function bitmapSet(bitIndex) {
-	const wordIndex = bitIndex >>> 5;
-	const mask = 1 << (bitIndex & 31);
-	BIT_WORDS[wordIndex] |= mask;
-}
-
-function bitmapTest(bitIndex) {
-	const wordIndex = bitIndex >>> 5;
-	const mask = 1 << (bitIndex & 31);
-	return (BIT_WORDS[wordIndex] & mask) !== 0;
-}
-
-// NOTE: bitmap is only for "might have" checks (can have false positives)
-// Real cached data is in this Map.
-const CACHE = new Map(); // userId -> userDoc
-
-function cachePut(userId, userDoc) {
-	CACHE.set(String(userId), userDoc);
-	bitmapSet(bitIndexForKey(userId));
-}
-
-function cacheGet(userId) {
-	const key = String(userId);
-	const bitIndex = bitIndexForKey(key);
-	if (!bitmapTest(bitIndex)) return null;
-	return CACHE.get(key) || null;
-}
+const { createClient } = require('redis');
 
 // -----------------------------
 // Mongo + server
 // -----------------------------
 
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 const MONGO_URI = process.env.MONGO_URI;
 const MONGO_DB = process.env.MONGO_DB;
 const MONGO_COLLECTION = process.env.MONGO_COLLECTION;
@@ -83,8 +38,8 @@ if (!MONGO_URI || !MONGO_DB || !MONGO_COLLECTION) {
 	// eslint-disable-next-line no-console
 	console.error(
 		'Missing env vars. Example:\n' +
-			'  npm i express mongodb\n' +
-			'  MONGO_URI="mongodb://localhost:27017" MONGO_DB="app" MONGO_COLLECTION="users" node HLD/Cache/Bitmap.js\n'
+			'  npm i express mongodb redis\n' +
+			'  REDIS_URL="redis://localhost:6379" MONGO_URI="mongodb://localhost:27017" MONGO_DB="app" MONGO_COLLECTION="users" node HLD/Cache/Bitmap.js\n'
 	);
 	process.exitCode = 1;
 } else {
@@ -94,6 +49,9 @@ if (!MONGO_URI || !MONGO_DB || !MONGO_COLLECTION) {
 	const client = new MongoClient(MONGO_URI);
 	let collection;
 
+	const redis = createClient({ url: REDIS_URL });
+	let redisReady = false;
+
 	async function ensureConnected() {
 		if (collection) return;
 		await client.connect();
@@ -102,9 +60,36 @@ if (!MONGO_URI || !MONGO_DB || !MONGO_COLLECTION) {
 		await collection.createIndex({ userId: 1 }, { unique: true });
 	}
 
+	async function ensureRedis() {
+		if (redisReady) return;
+		redis.on('error', () => {
+			// keep minimal; endpoint will return 500 if Redis is down
+		});
+		await redis.connect();
+		redisReady = true;
+	}
+
 	async function fetchUserFromMongo(userId) {
 		await ensureConnected();
 		return collection.findOne({ userId: String(userId) });
+	}
+
+	function redisKeyForUser(userId) {
+		return `user:${String(userId)}`;
+	}
+
+	async function cachePut(userId, userDoc) {
+		await ensureRedis();
+		await redis.set(redisKeyForUser(userId), JSON.stringify(userDoc));
+		// Optional (documentation/demo): Redis can store bitmaps via SETBIT/GETBIT.
+		// If userId is numeric, you can track presence efficiently:
+		// const idx = Number(userId); if (Number.isInteger(idx) && idx >= 0) await redis.setBit('users:presence', idx, 1);
+	}
+
+	async function cacheGet(userId) {
+		await ensureRedis();
+		const value = await redis.get(redisKeyForUser(userId));
+		return value ? JSON.parse(value) : null;
 	}
 
 	// (1) POST user data -> MongoDB (and also cache it)
@@ -118,7 +103,7 @@ if (!MONGO_URI || !MONGO_DB || !MONGO_COLLECTION) {
 			const doc = { ...body, userId: String(userId), updatedAt: new Date() };
 
 			await collection.updateOne({ userId: doc.userId }, { $set: doc }, { upsert: true });
-			cachePut(doc.userId, doc);
+			await cachePut(doc.userId, doc);
 
 			return res.json({ ok: true, source: 'mongo', cached: true, userId: doc.userId });
 		} catch (err) {
@@ -145,7 +130,7 @@ if (!MONGO_URI || !MONGO_DB || !MONGO_COLLECTION) {
 	app.get('/user/:userId/cache', async (req, res) => {
 		try {
 			const { userId } = req.params;
-			const cached = cacheGet(userId);
+			const cached = await cacheGet(userId);
 			if (cached) return res.json({ ok: true, source: 'cache', data: cached });
 
 			const start = Date.now();
@@ -153,7 +138,7 @@ if (!MONGO_URI || !MONGO_DB || !MONGO_COLLECTION) {
 			const ms = Date.now() - start;
 
 			if (!doc) return res.status(404).json({ ok: false, source: 'mongo', ms, error: 'not_found' });
-			cachePut(userId, doc);
+			await cachePut(userId, doc);
 			return res.json({ ok: true, source: 'mongo_cached', ms, data: doc });
 		} catch (err) {
 			return res.status(500).json({ ok: false, error: String(err && err.message ? err.message : err) });
