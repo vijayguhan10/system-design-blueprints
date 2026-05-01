@@ -20,6 +20,8 @@
 
 'use strict';
 
+require('dotenv').config();
+
 const express = require('express');
 const { MongoClient } = require('mongodb');
 const { createClient } = require('redis');
@@ -126,7 +128,7 @@ if (!MONGO_URI || !MONGO_DB || !MONGO_COLLECTION) {
 		}
 	});
 
-	// (3) GET from cache (bitmap+Map) else MongoDB (and cache it)
+	// (3) GET from Redis cache else MongoDB (and cache it)
 	app.get('/user/:userId/cache', async (req, res) => {
 		try {
 			const { userId } = req.params;
