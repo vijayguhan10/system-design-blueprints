@@ -1,6 +1,6 @@
 package LLD.SOLID_Principles;
 
-public  class SingleInstance {
+  class SingleInstance {
     private static SingleInstance instance;
 
     private SingleInstance() {
@@ -18,3 +18,10 @@ public  class SingleInstance {
         System.out.println("This is a method in the singleton class.");
     }
 }
+public class Srp {
+    public static void main(String[] args) {
+        SingleInstance singleInstance = SingleInstance.getInstance();
+        singleInstance.someMethod();
+    }
+}
+
